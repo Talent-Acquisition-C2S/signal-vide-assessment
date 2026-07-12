@@ -254,7 +254,7 @@ const DEFAULT_QUESTIONS = [
    a5:"Thoughtful, specific answer showing genuine self-reflection, where the concern doesn't undermine overall fit."}
 ];
 
-const BUILD_VERSION = '2026-07-12.FB2 (AI scoring via free Gemini API + transcript capture)';
+const BUILD_VERSION = '2026-07-12.FB3 (fixed Gemini model name to gemini-flash-latest)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -528,7 +528,7 @@ Score each answer on a 1 (Low) to 5 (High) scale for how much genuine interest, 
 Respond with ONLY valid JSON, no markdown, no preamble, in this exact shape:
 {"scores": {${questions.map(q=>`"${q.id}": 0`).join(', ')}}, "summary": "2-3 sentence recruiter-style note"}`;
 
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })

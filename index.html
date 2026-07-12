@@ -254,7 +254,7 @@ const DEFAULT_QUESTIONS = [
    a5:"Thoughtful, specific answer showing genuine self-reflection, where the concern doesn't undermine overall fit."}
 ];
 
-const BUILD_VERSION = '2026-07-12.FB1 (Firebase/Firestore backend, GitHub Pages hosting)';
+const BUILD_VERSION = '2026-07-12.FB2 (AI scoring via free Gemini API + transcript capture)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -505,6 +505,43 @@ function renderGate(){
   };
   document.getElementById('gateBtn').addEventListener('click', tryUnlock);
   document.getElementById('passInput').addEventListener('keydown', e=>{ if(e.key==='Enter') tryUnlock(); });
+}
+
+async function scoreWithGemini(apiKey, role, questions, transcripts){
+  const qaText = questions.map((q,i)=>
+    `Q${i+1} [${q.category}]: ${q.text}\nCandidate's answer (auto-transcribed, may contain minor errors): ${transcripts[q.id] || '(no transcript captured for this answer)'}`
+  ).join('\n\n');
+
+  const prompt = `You are helping a recruiter score a candidate's interest and seriousness about a role, based on transcribed video interview answers. Use only the content of what they said — you cannot assess tone, appearance, or delivery.
+
+Role applied for: ${role}
+
+${qaText}
+
+Score each answer on a 1 (Low) to 5 (High) scale for how much genuine interest, preparation, and seriousness it shows, using this rubric:
+1 = generic, no research, passive, nothing beyond logistics.
+2 = some genuine interest but thin on specifics.
+3 = reasonable engagement, some specifics.
+4 = clear "why this role" narrative, thoughtful, engaged.
+5 = all of the above, plus proactive, forward-looking, highly specific answers.
+
+Respond with ONLY valid JSON, no markdown, no preamble, in this exact shape:
+{"scores": {${questions.map(q=>`"${q.id}": 0`).join(', ')}}, "summary": "2-3 sentence recruiter-style note"}`;
+
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+  });
+  if(!resp.ok){
+    const errBody = await resp.text().catch(()=>'');
+    throw new Error(`Gemini API returned ${resp.status}${errBody ? ' — '+errBody.slice(0,200) : ''}`);
+  }
+  const data = await resp.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if(!text) throw new Error('Gemini response had no content — check your API key and quota');
+  const clean = text.replace(/```json|```/g,'').trim();
+  return JSON.parse(clean);
 }
 
 function dataUrlToBlob(dataUrl){
@@ -818,6 +855,10 @@ async function openAssessmentDetail(id){
       <p class="helper" style="margin-top:10px;margin-bottom:0;">Give the candidate the portal link + code, and tell them to choose "candidate assessment code." To share a recording with a hiring manager, use the "Download this recording" button under each answer below and forward the video file directly (email, Slack, Drive) — no extra link or code needed.</p>
       <span class="badge badge-grey" style="margin-top:10px;display:inline-flex;">${answeredCount}/${totalQ} answered</span>
     </div>
+    <div style="margin-bottom:16px;">
+      <button class="btn btn-ghost" id="scoreAiBtn">✨ Score with AI</button>
+      <div id="aiScoreResult" style="margin-top:10px;"></div>
+    </div>
     ${riskHtml}
     ${qaHtml}
     <div class="field" style="margin-top:6px;">
@@ -831,6 +872,46 @@ async function openAssessmentDetail(id){
   document.getElementById('closeDetail').addEventListener('click', ()=>overlay.remove());
   document.getElementById('copyPortal').addEventListener('click', ()=>copyLink(base));
   document.getElementById('copyCode').addEventListener('click', ()=>copyLink(code));
+  document.getElementById('scoreAiBtn').addEventListener('click', async ()=>{
+    const resultBox = document.getElementById('aiScoreResult');
+    const cfg = await getConfig();
+    if(!cfg.geminiApiKey){
+      resultBox.innerHTML = `<div class="error-text">No Gemini API key configured yet — add one for free in Settings first.</div>`;
+      return;
+    }
+    const transcripts = {};
+    let anyTranscript = false;
+    (meta.questions||[]).forEach(q=>{
+      const rec = meta.recordings ? meta.recordings[q.id] : null;
+      if(rec && rec.transcript){ transcripts[q.id] = rec.transcript; anyTranscript = true; }
+    });
+    if(!anyTranscript){
+      resultBox.innerHTML = `<div class="error-text">No transcripts were captured for this candidate's answers (their browser may not have supported live transcription). AI scoring needs a transcript to work.</div>`;
+      return;
+    }
+    const btn = document.getElementById('scoreAiBtn');
+    btn.disabled = true; btn.textContent = 'Scoring…';
+    resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>Asking Gemini to review the transcripts…</div>`;
+    try{
+      const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.questions||[], transcripts);
+      (meta.questions||[]).forEach(q=>{
+        const suggested = result.scores ? result.scores[q.id] : null;
+        if(suggested!=null){
+          const sel = overlay.querySelector(`[data-score="${q.id}"]`);
+          if(sel) sel.value = String(suggested);
+        }
+      });
+      resultBox.innerHTML = `<div class="card pad" style="background:#F5F7FA;">
+        <strong style="font-size:13px;">AI suggestion (review before saving):</strong>
+        <p style="font-size:13.5px;color:var(--muted);margin:6px 0 0;line-height:1.5;">${escapeHtml(result.summary||'')}</p>
+      </div>`;
+      toast('AI scores filled in — review and adjust before saving');
+    }catch(e){
+      console.error('scoreWithGemini failed', e);
+      resultBox.innerHTML = `<div class="error-text">AI scoring failed — ${escapeHtml(e.message||String(e))}</div>`;
+    }
+    btn.disabled = false; btn.textContent = '✨ Score with AI';
+  });
   overlay.querySelectorAll('[data-load-rec]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const qId = btn.dataset.loadRec;
@@ -936,11 +1017,25 @@ async function renderSettingsTab(){
     <p class="helper">This is the address candidates and hiring managers should use. Since this is hosted on GitHub Pages (not a Claude artifact), this link is stable and works normally.</p>
   </div>
   <div class="card pad" style="max-width:460px;margin-top:16px;">
+    <h4 style="margin-bottom:8px;">AI scoring (optional)</h4>
+    <p class="helper" style="margin-top:0;">Paste a free Gemini API key to enable AI-suggested scores in the recruiter console. Get one at <span class="mono">aistudio.google.com</span> — no credit card required. This key is stored in Firestore and used directly from the browser, so it isn't fully hidden from anyone inspecting this page's code; the free tier has no billing attached, so the practical risk is low (someone could exhaust your daily quota, not run up a bill).</p>
+    <div class="field" style="margin-top:12px;"><label>Gemini API key</label>
+      <input type="text" id="geminiKeyField" value="${escapeHtml(cfg.geminiApiKey||'')}" placeholder="AIza...">
+    </div>
+    <button class="btn btn-primary" id="saveGeminiKey" style="margin-top:10px;">Save API key</button>
+  </div>
+  <div class="card pad" style="max-width:460px;margin-top:16px;">
     <h4 style="margin-bottom:8px;">Firestore diagnostic</h4>
     <p class="helper" style="margin-top:0;">If assessments won't save or candidate codes won't be found, run this to confirm your Firebase project is reachable and configured correctly.</p>
     <button class="btn btn-ghost" id="runDiag" style="margin-top:8px;">Run diagnostic</button>
     <div id="diagResults" style="margin-top:14px;font-size:12.5px;line-height:1.7;"></div>
   </div>`;
+  document.getElementById('saveGeminiKey').addEventListener('click', async ()=>{
+    const val = document.getElementById('geminiKeyField').value.trim();
+    cfg.geminiApiKey = val;
+    await saveConfig(cfg);
+    toast(val ? 'Gemini API key saved' : 'Gemini API key cleared');
+  });
   document.getElementById('savePasscode').addEventListener('click', async ()=>{
     const val = document.getElementById('passcodeField').value.trim();
     if(!val){ toast('Passcode cannot be empty'); return; }
@@ -1003,6 +1098,7 @@ async function renderCandidateFlow(id){
   let qi = 0;
   let stream = null, recorder = null, chunks = [], recording = false, startTime = 0, timerHandle = null, audioCtx = null, analyser = null, rafId = null;
   let lastBlobUrl = null, lastBlobBase64 = null;
+  let recognition = null, lastTranscript = '';
 
   function progressDots(){
     return `<div class="progress-dots">${questions.map((_,i)=>`<span class="${i<qi?'done':i===qi?'current':''}"></span>`).join('')}</div>`;
@@ -1110,6 +1206,31 @@ async function renderCandidateFlow(id){
     }, 250);
 
     setupWaveform();
+    startTranscription();
+  }
+
+  function startTranscription(){
+    lastTranscript = '';
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){ recognition = null; return; } // silently skip if browser doesn't support it
+    try{
+      recognition = new SR();
+      recognition.continuous = true;
+      recognition.interimResults = false;
+      recognition.lang = 'en-US';
+      recognition.onresult = (event)=>{
+        let finalText = '';
+        for(let i=0;i<event.results.length;i++){
+          if(event.results[i].isFinal) finalText += event.results[i][0].transcript + ' ';
+        }
+        lastTranscript = finalText.trim();
+      };
+      recognition.onerror = ()=>{}; // non-fatal — scoring just won't have a transcript for this answer
+      recognition.start();
+    }catch(e){ recognition = null; }
+  }
+  function stopTranscription(){
+    if(recognition){ try{ recognition.stop(); }catch(e){} }
   }
 
   function setupWaveform(){
@@ -1143,6 +1264,7 @@ async function renderCandidateFlow(id){
     clearInterval(timerHandle);
     if(rafId) cancelAnimationFrame(rafId);
     if(audioCtx){ audioCtx.close().catch(()=>{}); audioCtx=null; }
+    stopTranscription();
     if(recorder && recorder.state !== 'inactive') recorder.stop();
   }
 
@@ -1198,7 +1320,7 @@ async function renderCandidateFlow(id){
     nextBtn.textContent = 'Saving…';
     const freshMeta = await getMeta(id) || meta;
     freshMeta.recordings = freshMeta.recordings || {};
-    freshMeta.recordings[q.id] = { chunkCount, recordedAt: Date.now() };
+    freshMeta.recordings[q.id] = { chunkCount, recordedAt: Date.now(), transcript: lastTranscript || '' };
     freshMeta.status = 'in_progress';
     const ok = await saveMeta(id, freshMeta);
     Object.assign(meta, freshMeta);

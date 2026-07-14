@@ -18,8 +18,8 @@
     --border:#E2E8F0;
     --text:#0F1B2D;
     --muted:#5B6B85;
-    --accent:#17C3B2;
-    --accent-dark:#0EA79A;
+    --accent:#C9A227;
+    --accent-dark:#A9860F;
     --green:#16A34A;
     --green-bg:#EAFBF1;
     --amber:#D97706;
@@ -63,8 +63,8 @@
 
   /* ---------- Gate ---------- */
   .gate-wrap{flex:1;display:flex;align-items:center;justify-content:center;background:
-      radial-gradient(circle at 20% 20%, rgba(23,195,178,.14), transparent 45%),
-      radial-gradient(circle at 80% 80%, rgba(23,195,178,.10), transparent 40%),
+      radial-gradient(circle at 20% 20%, rgba(201,162,39,.14), transparent 45%),
+      radial-gradient(circle at 80% 80%, rgba(201,162,39,.10), transparent 40%),
       var(--navy);
     padding:24px;}
   .gate-card{background:var(--card);border-radius:16px;padding:40px 36px;max-width:380px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,.35);}
@@ -80,7 +80,7 @@
   .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:none;border-radius:9px;padding:11px 18px;font-weight:600;font-size:14px;transition:all .15s;}
   .btn-primary{background:var(--navy);color:#fff;}
   .btn-primary:hover{background:var(--navy-light);}
-  .btn-accent{background:var(--accent);color:#04241F;}
+  .btn-accent{background:var(--accent);color:var(--navy);}
   .btn-accent:hover{background:var(--accent-dark);color:#fff;}
   .btn-ghost{background:transparent;color:var(--navy);border:1.5px solid var(--border);}
   .btn-ghost:hover{border-color:var(--navy);}
@@ -95,7 +95,7 @@
   .sidebar-header{padding:6px 8px 22px;}
   .nav-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;color:#C4D0E2;font-size:14px;font-weight:500;margin-bottom:2px;cursor:pointer;border:none;background:none;width:100%;text-align:left;}
   .nav-item:hover{background:rgba(255,255,255,.06);color:#fff;}
-  .nav-item.active{background:rgba(23,195,178,.16);color:#fff;}
+  .nav-item.active{background:rgba(201,162,39,.16);color:#fff;}
   .nav-item .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);opacity:0;}
   .nav-item.active .dot{opacity:1;}
   .sidebar-foot{margin-top:auto;padding:12px;font-size:11px;color:#7488A6;line-height:1.5;}
@@ -139,7 +139,7 @@
 
   /* ---------- question bank ---------- */
   .q-card{border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-bottom:14px;position:relative;}
-  .q-tag{display:inline-block;font-size:11px;font-weight:700;color:var(--accent-dark);background:rgba(23,195,178,.12);padding:3px 9px;border-radius:6px;margin-bottom:10px;letter-spacing:.02em;}
+  .q-tag{display:inline-block;font-size:11px;font-weight:700;color:var(--accent-dark);background:rgba(201,162,39,.12);padding:3px 9px;border-radius:6px;margin-bottom:10px;letter-spacing:.02em;}
   .anchor-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:12px;}
   .anchor-grid label{font-size:11px;color:var(--muted);font-weight:600;}
 
@@ -169,7 +169,7 @@
   .progress-dots span.current{background:#fff;}
   .cand-card{background:#fff;border-radius:18px;padding:32px 30px;box-shadow:0 20px 60px rgba(0,0,0,.35);}
   .cand-card h2{font-size:21px;margin-bottom:8px;}
-  .cand-card .role-pill{display:inline-block;background:rgba(23,195,178,.12);color:var(--accent-dark);font-size:12px;font-weight:700;padding:4px 11px;border-radius:100px;margin-bottom:14px;}
+  .cand-card .role-pill{display:inline-block;background:rgba(201,162,39,.12);color:var(--accent-dark);font-size:12px;font-weight:700;padding:4px 11px;border-radius:100px;margin-bottom:14px;}
   .qtext{font-size:17px;line-height:1.5;font-weight:600;margin:14px 0 18px;}
   .video-stage{position:relative;background:#0F1B2D;border-radius:12px;overflow:hidden;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;}
   .video-stage video{width:100%;height:100%;object-fit:cover;}
@@ -269,7 +269,7 @@ const DEFAULT_QUESTIONS = [
    a5:'Specific, minimal, or already-resolved conditions — a sign they are essentially ready to accept.'}
 ];
 
-const BUILD_VERSION = '2026-07-14.FB7 (Score Sheet questions, country field, JD reference, Zoho push, candidate instructions)';
+const BUILD_VERSION = '2026-07-14.FB10 (quick-delete from list, AI scores auto-save)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -340,6 +340,21 @@ async function loadRecordingDataUrl(assessmentId, questionId, chunkCount){
     full += snap.data().data;
   }
   return full;
+}
+async function deleteRecordingChunks(assessmentId, questionId, chunkCount){
+  const deletions = [];
+  for(let i=0;i<chunkCount;i++){
+    deletions.push(deleteDoc(doc(db,'assessments',assessmentId,'chunks',`${questionId}_${i}`)));
+  }
+  await Promise.all(deletions);
+}
+async function deleteAssessment(assessmentId){
+  try{
+    const chunksSnap = await getDocs(collection(db,'assessments',assessmentId,'chunks'));
+    await Promise.all(chunksSnap.docs.map(d=>deleteDoc(d.ref)));
+    await deleteDoc(doc(db,'assessments',assessmentId));
+    return true;
+  }catch(e){ console.error('deleteAssessment failed', e); return false; }
 }
 
 function uid(n=8){
@@ -760,7 +775,7 @@ async function renderAssessmentsTab(){
       flagHtml = `<span class="badge ${rb.cls}">${rb.label.split(' — ')[0]}</span>`;
     }
     rows += `<div class="list-row">
-      <div><div class="cand-name">${escapeHtml(m.candidateName)}</div><div class="cand-role">${escapeHtml(m.role)}${m.country ? ' · '+escapeHtml(m.country) : ''}</div></div>
+      <div><div class="cand-name">${escapeHtml(m.candidateName)} <button class="icon-btn" data-quickdel="${m.id}" data-name="${escapeHtml(m.candidateName)}" title="Delete assessment" style="font-size:13px;padding:0 0 0 4px;vertical-align:middle;">🗑</button></div><div class="cand-role">${escapeHtml(m.role)}${m.country ? ' · '+escapeHtml(m.country) : ''}</div></div>
       <div>${escapeHtml(m.stage||'Pre-Interview')}</div>
       <div>${statusBadge}</div>
       <div class="mono">${scoreTxt}</div>
@@ -770,6 +785,16 @@ async function renderAssessmentsTab(){
   });
   listCard.innerHTML = rows;
   listCard.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click', ()=> openAssessmentDetail(b.dataset.open)));
+  listCard.querySelectorAll('[data-quickdel]').forEach(b=>b.addEventListener('click', async (e)=>{
+    e.stopPropagation();
+    const delId = b.dataset.quickdel;
+    const name = b.dataset.name;
+    if(!confirm(`Delete ${name}'s assessment permanently? This removes all recordings and scores — this cannot be undone.`)) return;
+    b.disabled = true;
+    const ok = await deleteAssessment(delId);
+    if(ok){ toast('Assessment deleted'); renderAssessmentsTab(); }
+    else{ b.disabled = false; toast('Could not delete — check your connection and try again'); }
+  }));
 }
 
 async function openNewAssessmentModal(){
@@ -887,7 +912,10 @@ async function openAssessmentDetail(id){
       <h4>${escapeHtml(q.text)}</h4>
       <div class="qa-flex">
         <div id="qa-video-${q.id}">
-          ${rec ? `<button class="btn btn-ghost" data-load-rec="${q.id}" data-chunks="${rec.chunkCount}" data-filename="${fileName}">▶ Load recording</button>`
+          ${rec ? `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+                     <button class="btn btn-ghost" data-load-rec="${q.id}" data-chunks="${rec.chunkCount}" data-filename="${fileName}">▶ Load recording</button>
+                     <button class="btn btn-danger" data-del-rec="${q.id}" data-chunks="${rec.chunkCount}">🗑 Delete recording</button>
+                   </div>`
                 : `<div class="qa-video" style="height:200px;display:flex;align-items:center;justify-content:center;color:#8FA0BE;font-size:13px;">No recording yet</div>`}
         </div>
         <div class="qa-score">
@@ -974,20 +1002,25 @@ async function openAssessmentDetail(id){
     resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>Asking Gemini to review the transcripts…</div>`;
     try{
       const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.jobDescription||'', meta.questions||[], transcripts);
+      const newScores = {};
       (meta.questions||[]).forEach(q=>{
         const suggested = result.scores ? result.scores[q.id] : null;
         if(suggested!=null){
+          newScores[q.id] = suggested;
           const sel = overlay.querySelector(`[data-score="${q.id}"]`);
           if(sel) sel.value = String(suggested);
         }
       });
+      meta.scores = newScores;
+      const saved = await saveMeta(id, meta);
       const flagsHtml = (result.flags||[]).map(f=>`<span class="flag-tag">${escapeHtml(f)}</span>`).join('');
       resultBox.innerHTML = `<div class="card pad" style="background:#F5F7FA;">
-        <strong style="font-size:13px;">AI suggestion (review before saving):</strong>
+        <strong style="font-size:13px;">${saved ? '✓ AI scores saved automatically' : '⚠ AI scores filled in, but auto-save failed — click "Save scores & notes" below'}:</strong>
         <p style="font-size:13.5px;color:var(--muted);margin:6px 0 0;line-height:1.5;">${escapeHtml(result.summary||'')}</p>
         ${flagsHtml ? `<div style="margin-top:8px;">${flagsHtml}</div>` : ''}
+        <p class="helper" style="margin-top:8px;margin-bottom:0;">You can still adjust any score above and click "Save scores & notes" to override.</p>
       </div>`;
-      toast('AI scores filled in — review and adjust before saving');
+      toast(saved ? 'AI scores saved — adjust and re-save if needed' : 'AI scoring done, but saving failed');
     }catch(e){
       console.error('scoreWithGemini failed', e);
       resultBox.innerHTML = `<div class="error-text">AI scoring failed — ${escapeHtml(e.message||String(e))}</div>`;
@@ -1027,13 +1060,47 @@ async function openAssessmentDetail(id){
       try{
         const dataUrl = await loadRecordingDataUrl(id, qId, chunkCount);
         container.innerHTML = `<video class="qa-video" controls src="${dataUrl}"></video>
-          <a class="btn btn-ghost" href="${dataUrl}" download="${fileName}" style="margin-top:8px;display:inline-flex;padding:7px 12px;font-size:13px;">⬇ Download this recording</a>`;
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+            <a class="btn btn-ghost" href="${dataUrl}" download="${fileName}" style="padding:7px 12px;font-size:13px;">⬇ Download this recording</a>
+            <button class="btn btn-danger" data-del-rec="${qId}" data-chunks="${chunkCount}" style="padding:7px 12px;font-size:13px;">🗑 Delete recording</button>
+          </div>`;
+        wireDeleteRecBtn(container.querySelector('[data-del-rec]'));
       }catch(e){
         console.error('loadRecordingDataUrl failed', e);
         container.innerHTML = `<div class="error-text">Couldn't load this recording — ${escapeHtml(e.message||String(e))}</div>`;
       }
     });
   });
+
+  function wireDeleteRecBtn(btn){
+    if(!btn) return;
+    btn.addEventListener('click', async ()=>{
+      const qId = btn.dataset.delRec;
+      const chunkCount = Number(btn.dataset.chunks);
+      if(!confirm('Delete this recording? The candidate\'s answer to this question will be permanently removed — this cannot be undone.')) return;
+      btn.disabled = true; btn.textContent = 'Deleting…';
+      try{
+        await deleteRecordingChunks(id, qId, chunkCount);
+        if(meta.recordings) delete meta.recordings[qId];
+        const ok = await saveMeta(id, meta);
+        if(!ok) throw new Error('Could not update the assessment record after deleting the recording');
+        const container = document.getElementById('qa-video-'+qId);
+        container.innerHTML = `<div class="qa-video" style="height:200px;display:flex;align-items:center;justify-content:center;color:#8FA0BE;font-size:13px;">No recording yet</div>`;
+        const answeredBadge = overlay.querySelector('.badge-grey');
+        if(answeredBadge){
+          const newCount = Object.keys(meta.recordings||{}).length;
+          const totalQ2 = (meta.questions||[]).length;
+          answeredBadge.textContent = `${newCount}/${totalQ2} answered`;
+        }
+        toast('Recording deleted');
+      }catch(e){
+        console.error('deleteRecordingChunks failed', e);
+        btn.disabled = false; btn.textContent = '🗑 Delete recording';
+        toast('Could not delete — check your connection and try again');
+      }
+    });
+  }
+  overlay.querySelectorAll('[data-del-rec]').forEach(wireDeleteRecBtn);
   document.getElementById('saveDetailBtn').addEventListener('click', async ()=>{
     const newScores = {};
     overlay.querySelectorAll('[data-score]').forEach(sel=>{

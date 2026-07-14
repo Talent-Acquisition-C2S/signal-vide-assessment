@@ -153,6 +153,11 @@
   .qa-flex{display:flex;gap:22px;flex-wrap:wrap;}
   .qa-score{min-width:220px;}
   .anchor-hint{font-size:12px;color:var(--muted);background:#F5F7FA;border-radius:8px;padding:9px 11px;margin-top:8px;line-height:1.5;}
+  .flag-tag{display:inline-block;font-size:11px;font-weight:600;background:var(--red-bg);color:var(--red);padding:3px 9px;border-radius:100px;margin-right:6px;margin-top:6px;}
+  .jd-box{background:#F5F7FA;border:1px solid var(--border);border-radius:9px;padding:12px 14px;font-size:13px;line-height:1.6;color:var(--text);white-space:pre-wrap;max-height:220px;overflow-y:auto;margin-top:8px;}
+  .instr-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px;}
+  .instr-list li{display:flex;gap:10px;font-size:13.5px;color:var(--text);line-height:1.5;}
+  .instr-list li::before{content:'✓';flex-shrink:0;color:var(--accent-dark);font-weight:700;}
 
   /* ---------- candidate flow ---------- */
   .cand-wrap{flex:1;display:flex;flex-direction:column;align-items:center;background:var(--navy);padding:26px 18px 60px;}
@@ -232,29 +237,39 @@ const db = getFirestore(fbApp);
 const CHUNK_SIZE = 700000; // characters per Firestore doc, safely under 1MB
 
 const DEFAULT_QUESTIONS = [
-  {id:'q1', category:'Motivation & Research Effort', weightLabel:'25%',
-   text:"What specifically drew you to apply for this role, and what did you do to learn more about CLaaS2SaaS before applying?",
+  {id:'q1', category:'Preparation',
+   text:"What made you look into CLaaS2SaaS specifically, and what did you learn?",
    a1:'Generic reason ("saw the posting", "sounds interesting"); no evidence of research beyond the job ad.',
-   a3:'Reasonable personal motivation, with some awareness of the company but nothing beyond surface-level.',
-   a5:"Specific, personal reason tied to their own experience or goals, plus clear evidence of real research (product, mission, recent news, team)."},
-  {id:'q2', category:'Priority vs. Other Options', weightLabel:'25%',
-   text:"Out of everything you're currently exploring, where does this opportunity rank for you, and why?",
-   a1:'Evasive on ranking, or openly states this role is a backup / last resort.',
-   a3:"Says it's a genuine option among a few, without a strong reason it stands out.",
-   a5:'Clearly ranks this role highly, with specific reasons it stands out from other options.'},
-  {id:'q3', category:'Decision Readiness', weightLabel:'25%',
-   text:"If you were offered this role tomorrow, what — if anything — would need to be true for you to say yes right away?",
-   a1:"Long list of unresolved conditions, or can't answer / visibly deflects the question.",
-   a3:'One or two reasonable conditions raised (e.g. confirm salary, meet the team) but otherwise ready to move.',
-   a5:'Essentially ready to accept — no major open conditions, or key concerns are already resolved.'},
-  {id:'q4', category:'Genuine Reflection', weightLabel:'25%',
-   text:"What's one part of this role you're least excited about, or unsure you'd enjoy?",
-   a1:'Cannot name anything (over-rehearsed "no weaknesses" answer), or the answer reveals a fundamental mismatch.',
-   a3:"Names a minor, reasonable concern that doesn't raise major implications.",
-   a5:"Thoughtful, specific answer showing genuine self-reflection, where the concern doesn't undermine overall fit."}
+   a3:'Some awareness of the company beyond the ad, but references stay general rather than specific.',
+   a5:"Specific references to CLaaS2SaaS's products, news, mission, or team — clear evidence of real research."},
+  {id:'q2', category:'Motivation — Why This Role',
+   text:"Walk me through why this role, at this point in your career.",
+   a1:'Vague or rehearsed line with no real personal narrative connecting past experience to this move.',
+   a3:"Reasonable personal motivation, but the connection between their background and this move is thin.",
+   a5:'Clear, specific personal narrative tying past experience and goals directly to this role.'},
+  {id:'q3', category:"Motivation — What's Missing",
+   text:"What's missing in your current role that you're hoping to find here?",
+   a1:'Vague dissatisfaction or badmouthing a current/former employer, with no concrete gap named.',
+   a3:"Names a reasonable gap (growth, scope, stability) but doesn't tie it specifically to this role.",
+   a5:'Concrete, specific gap named, clearly and credibly addressed by this particular role.'},
+  {id:'q4', category:'Practical Readiness',
+   text:"If we moved forward, what would your timeline look like on notice period?",
+   a1:"Can't answer, visibly deflects, or gives an unrealistic/unresolved timeline.",
+   a3:'Gives a timeline, but it is vague or has significant unresolved conditions.',
+   a5:'Direct, specific, thought-through answer — a sign they have considered actually taking the job.'},
+  {id:'q5', category:'Seriousness Under Friction',
+   text:"Every role has a harder or less glamorous side. What part of this one do you expect to be toughest for you day-to-day, and how do you feel about that?",
+   a1:'Cannot name anything real (over-rehearsed "no weaknesses" answer), or names something suggesting a fundamental mismatch.',
+   a3:"Names a minor, reasonable concern, but engagement with it stays fairly surface-level.",
+   a5:'Realistic, thoughtful engagement with a genuine hard part of the role, without it undermining overall fit.'},
+  {id:'q6', category:'Close — Decision Readiness',
+   text:"What would you need to see from us to say yes if we made an offer?",
+   a1:"Long list of unresolved conditions, or can't answer / deflects the question entirely.",
+   a3:'One or two reasonable conditions raised (e.g. confirm salary, meet the team), otherwise ready to move.',
+   a5:'Specific, minimal, or already-resolved conditions — a sign they are essentially ready to accept.'}
 ];
 
-const BUILD_VERSION = '2026-07-12.FB3 (fixed Gemini model name to gemini-flash-latest)';
+const BUILD_VERSION = '2026-07-14.FB7 (Score Sheet questions, country field, JD reference, Zoho push, candidate instructions)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -263,7 +278,7 @@ async function getConfig(){
     const snap = await getDoc(doc(db,'config','main'));
     if(snap.exists()) return snap.data();
   }catch(e){ console.error('getConfig failed', e); }
-  const def = {passcode:'signal2026'};
+  const def = {passcode:'signal2026', geminiApiKey:'', zohoWebhookUrl:''};
   try{ await setDoc(doc(db,'config','main'), def); }catch(e){ console.error('init config failed', e); }
   return def;
 }
@@ -507,15 +522,15 @@ function renderGate(){
   document.getElementById('passInput').addEventListener('keydown', e=>{ if(e.key==='Enter') tryUnlock(); });
 }
 
-async function scoreWithGemini(apiKey, role, questions, transcripts){
+async function scoreWithGemini(apiKey, role, jobDescription, questions, transcripts){
   const qaText = questions.map((q,i)=>
     `Q${i+1} [${q.category}]: ${q.text}\nCandidate's answer (auto-transcribed, may contain minor errors): ${transcripts[q.id] || '(no transcript captured for this answer)'}`
   ).join('\n\n');
 
-  const prompt = `You are helping a recruiter score a candidate's interest and seriousness about a role, based on transcribed video interview answers. Use only the content of what they said — you cannot assess tone, appearance, or delivery.
+  const prompt = `You are helping a recruiter measure a candidate's genuine INTEREST and SERIOUSNESS about a role, based on transcribed video interview answers. Use only the content of what they said — you cannot assess tone, appearance, or delivery.
 
 Role applied for: ${role}
-
+${jobDescription ? `\nJob description (for reference — use this to judge whether the candidate's stated motivation and readiness genuinely map to this specific role, not just enthusiasm in general):\n${jobDescription}\n` : ''}
 ${qaText}
 
 Score each answer on a 1 (Low) to 5 (High) scale for how much genuine interest, preparation, and seriousness it shows, using this rubric:
@@ -525,8 +540,10 @@ Score each answer on a 1 (Low) to 5 (High) scale for how much genuine interest, 
 4 = clear "why this role" narrative, thoughtful, engaged.
 5 = all of the above, plus proactive, forward-looking, highly specific answers.
 
+Also list any flight-risk flags as short strings (e.g. "vague on notice period", "generic motivation", "avoided the friction question", "unresolved deal-breakers") — an empty array if none stand out.
+
 Respond with ONLY valid JSON, no markdown, no preamble, in this exact shape:
-{"scores": {${questions.map(q=>`"${q.id}": 0`).join(', ')}}, "summary": "2-3 sentence recruiter-style note"}`;
+{"scores": {${questions.map(q=>`"${q.id}": 0`).join(', ')}}, "summary": "2-3 sentence recruiter-style note on overall interest and seriousness", "flags": []}`;
 
   const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
@@ -542,6 +559,52 @@ Respond with ONLY valid JSON, no markdown, no preamble, in this exact shape:
   if(!text) throw new Error('Gemini response had no content — check your API key and quota');
   const clean = text.replace(/```json|```/g,'').trim();
   return JSON.parse(clean);
+}
+
+/* ---------------- Zoho Recruit push ---------------- */
+async function pushToZoho(webhookUrl, meta, id, includeVideo){
+  const scores = meta.scores || {};
+  const totalQ = (meta.questions||[]).length;
+  const scoredAll = totalQ && (meta.questions||[]).every(q=> scores[q.id]!=null);
+  const avg = scoredAll ? (meta.questions.reduce((s,q)=>s+Number(scores[q.id]||0),0)/totalQ) : null;
+
+  const answers = [];
+  for(const q of (meta.questions||[])){
+    const rec = meta.recordings ? meta.recordings[q.id] : null;
+    const entry = {
+      category: q.category,
+      question: q.text,
+      score: scores[q.id] ?? null,
+      transcript: (rec && rec.transcript) || ''
+    };
+    if(includeVideo && rec && rec.chunkCount){
+      try{ entry.video_base64 = await loadRecordingDataUrl(id, q.id, rec.chunkCount); }
+      catch(e){ entry.video_error = 'Could not load recording: ' + (e.message||String(e)); }
+    }
+    answers.push(entry);
+  }
+
+  const payload = {
+    assessment_code: id,
+    candidate_name: meta.candidateName || '',
+    role: meta.role || '',
+    country: meta.country || '',
+    stage: meta.stage || '',
+    created_at: meta.createdAt ? new Date(meta.createdAt).toISOString() : '',
+    job_description: meta.jobDescription || '',
+    overall_score: avg!=null ? Number(avg.toFixed(2)) : null,
+    risk_band: avg!=null ? riskBand(avg).label : null,
+    recruiter_notes: meta.notes || '',
+    answers
+  };
+
+  const resp = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  });
+  if(!resp.ok) throw new Error('Webhook returned ' + resp.status);
+  return true;
 }
 
 function dataUrlToBlob(dataUrl){
@@ -620,6 +683,7 @@ async function exportAssessmentsToExcel(){
     return {
       'Candidate Name': m.candidateName || '',
       'Role': m.role || '',
+      'Country': m.country || '',
       'Stage': m.stage || '',
       'Date Created': m.createdAt ? new Date(m.createdAt).toISOString().slice(0,10) : '',
       'Status': answered>=total && total>0 ? 'Submitted' : (answered>0 ? 'In progress' : 'Not started'),
@@ -627,6 +691,7 @@ async function exportAssessmentsToExcel(){
       'Average Score (1-5)': avgScore,
       'Risk Band': risk,
       'Assessment Code': m.id,
+      'Zoho Status': m.zohoStatus || 'not_sent',
       'Recording File Names': recordingFiles,
       'Recruiter Notes': m.notes || ''
     };
@@ -638,7 +703,7 @@ async function exportAssessmentsToExcel(){
   }
   const ws = XLSX.utils.json_to_sheet(rows);
   ws['!cols'] = [
-    {wch:22},{wch:22},{wch:14},{wch:12},{wch:12},{wch:10},{wch:16},{wch:22},{wch:14},{wch:34},{wch:40}
+    {wch:22},{wch:22},{wch:16},{wch:14},{wch:12},{wch:12},{wch:10},{wch:16},{wch:22},{wch:14},{wch:12},{wch:34},{wch:40}
   ];
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Assessments');
@@ -695,7 +760,7 @@ async function renderAssessmentsTab(){
       flagHtml = `<span class="badge ${rb.cls}">${rb.label.split(' — ')[0]}</span>`;
     }
     rows += `<div class="list-row">
-      <div><div class="cand-name">${escapeHtml(m.candidateName)}</div><div class="cand-role">${escapeHtml(m.role)}</div></div>
+      <div><div class="cand-name">${escapeHtml(m.candidateName)}</div><div class="cand-role">${escapeHtml(m.role)}${m.country ? ' · '+escapeHtml(m.country) : ''}</div></div>
       <div>${escapeHtml(m.stage||'Pre-Interview')}</div>
       <div>${statusBadge}</div>
       <div class="mono">${scoreTxt}</div>
@@ -716,8 +781,12 @@ async function openNewAssessmentModal(){
     <p style="color:var(--muted);font-size:13.5px;margin:2px 0 18px;">This uses the current question bank (${questions.length} question${questions.length===1?'':'s'}). Edit it anytime from the sidebar.</p>
     <div class="field" style="margin-bottom:14px;"><label>Candidate name</label><input type="text" id="fCand" placeholder="e.g. Juan Dela Cruz"></div>
     <div class="field" style="margin-bottom:14px;"><label>Role applied for</label><input type="text" id="fRole" placeholder="e.g. Azure AI Engineer"></div>
-    <div class="field" style="margin-bottom:18px;"><label>Assessment stage</label>
+    <div class="field" style="margin-bottom:14px;"><label>Country (candidate location)</label><input type="text" id="fCountry" placeholder="e.g. Philippines"></div>
+    <div class="field" style="margin-bottom:14px;"><label>Assessment stage</label>
       <select id="fStage"><option>Pre-Interview</option><option>Post-Interview</option></select>
+    </div>
+    <div class="field" style="margin-bottom:18px;"><label>Job description (optional — reference for AI scoring)</label>
+      <textarea id="fJD" rows="5" placeholder="Paste the JD here so AI scoring can judge whether the candidate's answers genuinely map to this specific role…"></textarea>
     </div>
     <button class="btn btn-accent btn-block" id="createBtn">Generate assessment link</button>
     <div id="resultArea"></div>
@@ -728,14 +797,16 @@ async function openNewAssessmentModal(){
   document.getElementById('createBtn').addEventListener('click', async ()=>{
     const candidateName = document.getElementById('fCand').value.trim();
     const role = document.getElementById('fRole').value.trim();
+    const country = document.getElementById('fCountry').value.trim();
     const stage = document.getElementById('fStage').value;
+    const jobDescription = document.getElementById('fJD').value.trim();
     if(!candidateName || !role){ toast('Please fill in candidate name and role'); return; }
     const id = uid();
     const meta = {
-      id, candidateName, role, stage,
+      id, candidateName, role, country, stage, jobDescription,
       createdAt: Date.now(), status:'not_started',
       questions: questions.map(q=>({id:q.id, category:q.category, text:q.text, a1:q.a1, a3:q.a3, a5:q.a5})),
-      recordings: {}, scores:{}, notes:''
+      recordings: {}, scores:{}, notes:'', zohoStatus:'not_sent'
     };
     const createBtn = document.getElementById('createBtn');
     createBtn.disabled = true; createBtn.textContent = 'Saving…';
@@ -833,11 +904,13 @@ async function openAssessmentDetail(id){
     </div>`;
   }
 
+  const zohoBtnLabel = meta.zohoStatus === 'sent' ? 'Sent to Zoho ✓' : meta.zohoStatus === 'failed' ? 'Retry Zoho push' : 'Push to Zoho Recruit';
+
   overlay.innerHTML = `<div class="modal" style="max-width:760px;">
     <div class="modal-top">
       <div>
         <h3>${escapeHtml(meta.candidateName)}</h3>
-        <p style="color:var(--muted);font-size:13.5px;margin-top:2px;">${escapeHtml(meta.role)} · ${escapeHtml(meta.stage)} · ${fmtDate(meta.createdAt)}</p>
+        <p style="color:var(--muted);font-size:13.5px;margin-top:2px;">${escapeHtml(meta.role)}${meta.country ? ' · '+escapeHtml(meta.country) : ''} · ${escapeHtml(meta.stage)} · ${fmtDate(meta.createdAt)}</p>
       </div>
       <button class="icon-btn" id="closeDetail">✕</button>
     </div>
@@ -855,10 +928,15 @@ async function openAssessmentDetail(id){
       <p class="helper" style="margin-top:10px;margin-bottom:0;">Give the candidate the portal link + code, and tell them to choose "candidate assessment code." To share a recording with a hiring manager, use the "Download this recording" button under each answer below and forward the video file directly (email, Slack, Drive) — no extra link or code needed.</p>
       <span class="badge badge-grey" style="margin-top:10px;display:inline-flex;">${answeredCount}/${totalQ} answered</span>
     </div>
-    <div style="margin-bottom:16px;">
+    ${meta.jobDescription ? `<div style="margin-bottom:16px;">
+      <div class="expand-toggle" id="jdToggle" style="font-size:12px;color:var(--muted);cursor:pointer;text-decoration:underline;">Job description reference</div>
+      <div class="jd-box hidden" id="jdBox">${escapeHtml(meta.jobDescription)}</div>
+    </div>` : ''}
+    <div style="margin-bottom:16px;display:flex;gap:10px;flex-wrap:wrap;">
       <button class="btn btn-ghost" id="scoreAiBtn">✨ Score with AI</button>
-      <div id="aiScoreResult" style="margin-top:10px;"></div>
+      <button class="btn btn-ghost" id="zohoPushBtn">${zohoBtnLabel}</button>
     </div>
+    <div id="aiScoreResult" style="margin-bottom:16px;"></div>
     ${riskHtml}
     ${qaHtml}
     <div class="field" style="margin-top:6px;">
@@ -872,6 +950,8 @@ async function openAssessmentDetail(id){
   document.getElementById('closeDetail').addEventListener('click', ()=>overlay.remove());
   document.getElementById('copyPortal').addEventListener('click', ()=>copyLink(base));
   document.getElementById('copyCode').addEventListener('click', ()=>copyLink(code));
+  const jdToggle = document.getElementById('jdToggle');
+  if(jdToggle){ jdToggle.addEventListener('click', ()=>{ document.getElementById('jdBox').classList.toggle('hidden'); }); }
   document.getElementById('scoreAiBtn').addEventListener('click', async ()=>{
     const resultBox = document.getElementById('aiScoreResult');
     const cfg = await getConfig();
@@ -893,7 +973,7 @@ async function openAssessmentDetail(id){
     btn.disabled = true; btn.textContent = 'Scoring…';
     resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>Asking Gemini to review the transcripts…</div>`;
     try{
-      const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.questions||[], transcripts);
+      const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.jobDescription||'', meta.questions||[], transcripts);
       (meta.questions||[]).forEach(q=>{
         const suggested = result.scores ? result.scores[q.id] : null;
         if(suggested!=null){
@@ -901,9 +981,11 @@ async function openAssessmentDetail(id){
           if(sel) sel.value = String(suggested);
         }
       });
+      const flagsHtml = (result.flags||[]).map(f=>`<span class="flag-tag">${escapeHtml(f)}</span>`).join('');
       resultBox.innerHTML = `<div class="card pad" style="background:#F5F7FA;">
         <strong style="font-size:13px;">AI suggestion (review before saving):</strong>
         <p style="font-size:13.5px;color:var(--muted);margin:6px 0 0;line-height:1.5;">${escapeHtml(result.summary||'')}</p>
+        ${flagsHtml ? `<div style="margin-top:8px;">${flagsHtml}</div>` : ''}
       </div>`;
       toast('AI scores filled in — review and adjust before saving');
     }catch(e){
@@ -911,6 +993,29 @@ async function openAssessmentDetail(id){
       resultBox.innerHTML = `<div class="error-text">AI scoring failed — ${escapeHtml(e.message||String(e))}</div>`;
     }
     btn.disabled = false; btn.textContent = '✨ Score with AI';
+  });
+  document.getElementById('zohoPushBtn').addEventListener('click', async ()=>{
+    const cfg = await getConfig();
+    const btn = document.getElementById('zohoPushBtn');
+    if(!cfg.zohoWebhookUrl){
+      toast('No Zoho webhook URL configured yet — add one in Settings first.');
+      return;
+    }
+    const includeVideo = confirm('Include the video recordings in this push (as base64 data), so they land straight in Zoho Recruit?\n\nChoose Cancel to send candidate details, transcripts, and scores only — you can still forward recordings manually.');
+    btn.disabled = true; btn.textContent = 'Sending…';
+    try{
+      await pushToZoho(cfg.zohoWebhookUrl, meta, id, includeVideo);
+      meta.zohoStatus = 'sent';
+      await saveMeta(id, meta);
+      btn.textContent = 'Sent to Zoho ✓';
+      toast('Pushed to Zoho Recruit');
+    }catch(e){
+      console.error('pushToZoho failed', e);
+      meta.zohoStatus = 'failed';
+      try{ await saveMeta(id, meta); }catch(e2){}
+      btn.disabled = false; btn.textContent = 'Retry Zoho push';
+      toast('Zoho push failed — check the webhook URL and CORS settings');
+    }
   });
   overlay.querySelectorAll('[data-load-rec]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
@@ -1025,6 +1130,14 @@ async function renderSettingsTab(){
     <button class="btn btn-primary" id="saveGeminiKey" style="margin-top:10px;">Save API key</button>
   </div>
   <div class="card pad" style="max-width:460px;margin-top:16px;">
+    <h4 style="margin-bottom:8px;">Zoho Recruit integration</h4>
+    <p class="helper" style="margin-top:0;">Paste an inbound webhook URL to push candidate details, scores, transcripts, and (optionally) recordings straight to Zoho Recruit. Set up a Zoho Recruit <em>Custom Function with a REST webhook trigger</em> — or route through Zoho Flow / Make.com / a small serverless proxy — that accepts JSON and creates or updates the candidate record. Direct browser pushes only work if that endpoint accepts CORS requests from this page's domain; if Zoho's API rejects the direct call, point this field at a Zoho Flow / Make.com / proxy URL instead.</p>
+    <div class="field" style="margin-top:12px;"><label>Zoho Recruit inbound webhook URL</label>
+      <input type="text" id="zohoUrlField" value="${escapeHtml(cfg.zohoWebhookUrl||'')}" placeholder="https://flow.zoho.com/... or your proxy URL">
+    </div>
+    <button class="btn btn-primary" id="saveZohoUrl" style="margin-top:10px;">Save webhook URL</button>
+  </div>
+  <div class="card pad" style="max-width:460px;margin-top:16px;">
     <h4 style="margin-bottom:8px;">Firestore diagnostic</h4>
     <p class="helper" style="margin-top:0;">If assessments won't save or candidate codes won't be found, run this to confirm your Firebase project is reachable and configured correctly.</p>
     <button class="btn btn-ghost" id="runDiag" style="margin-top:8px;">Run diagnostic</button>
@@ -1035,6 +1148,12 @@ async function renderSettingsTab(){
     cfg.geminiApiKey = val;
     await saveConfig(cfg);
     toast(val ? 'Gemini API key saved' : 'Gemini API key cleared');
+  });
+  document.getElementById('saveZohoUrl').addEventListener('click', async ()=>{
+    const val = document.getElementById('zohoUrlField').value.trim();
+    cfg.zohoWebhookUrl = val;
+    await saveConfig(cfg);
+    toast(val ? 'Zoho webhook URL saved' : 'Zoho webhook URL cleared');
   });
   document.getElementById('savePasscode').addEventListener('click', async ()=>{
     const val = document.getElementById('passcodeField').value.trim();
@@ -1111,13 +1230,19 @@ async function renderCandidateFlow(id){
         <div class="role-pill">${escapeHtml(meta.role)}</div>
         <h2>Hi ${escapeHtml(meta.candidateName.split(' ')[0])}, ready for your video assessment?</h2>
         <p style="color:var(--muted);font-size:14px;line-height:1.6;">
-          You'll answer ${questions.length} short question${questions.length===1?'':'s'} on video — about ${questions.length*1}–${questions.length*2} minutes total.
-          There's no script; speak naturally. You can re-record any answer before moving on.
+          You'll answer ${questions.length} short question${questions.length===1?'':'s'} on video. There's no script — speak naturally, and you can re-record any answer before moving on.
         </p>
-        <div class="helper" style="background:#F5F7FA;padding:12px 14px;border-radius:9px;">
-          We'll ask to use your camera and microphone. Recordings are only visible to the CLaaS2SaaS recruiting team and the hiring manager for this role.
+        <div class="helper" style="background:#F5F7FA;padding:14px 16px;border-radius:9px;">
+          <strong style="color:var(--text);font-size:13px;">Before you begin, please note:</strong>
+          <ul class="instr-list" style="margin-top:10px;">
+            <li>The video assessment will take approximately 5–8 minutes to complete.</li>
+            <li>Kindly ensure that you are dressed in proper business attire and seated in a quiet, well-lit space with a clean, professional background.</li>
+            <li>Please use a device with a working camera and microphone, and confirm that you have a stable internet connection before starting.</li>
+            <li>We encourage you to complete the assessment in one sitting and to treat it as you would a formal interview.</li>
+          </ul>
         </div>
-        <button class="btn btn-accent btn-block" id="startBtn" style="margin-top:20px;">Turn on camera &amp; begin</button>
+        <p class="helper" style="margin-top:12px;">We'll ask to use your camera and microphone. Recordings are only visible to the CLaaS2SaaS recruiting team and the hiring manager for this role.</p>
+        <button class="btn btn-accent btn-block" id="startBtn" style="margin-top:16px;">Turn on camera &amp; begin</button>
       </div>
     </div></div>`;
     document.getElementById('startBtn').addEventListener('click', beginQuestion);

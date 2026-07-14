@@ -269,7 +269,7 @@ const DEFAULT_QUESTIONS = [
    a5:'Specific, minimal, or already-resolved conditions — a sign they are essentially ready to accept.'}
 ];
 
-const BUILD_VERSION = '2026-07-14.FB10 (quick-delete from list, AI scores auto-save)';
+const BUILD_VERSION = '2026-07-14.FB14 (AI scores directly from video — no transcript required, works on old recordings too)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -537,43 +537,122 @@ function renderGate(){
   document.getElementById('passInput').addEventListener('keydown', e=>{ if(e.key==='Enter') tryUnlock(); });
 }
 
-async function scoreWithGemini(apiKey, role, jobDescription, questions, transcripts){
-  const qaText = questions.map((q,i)=>
-    `Q${i+1} [${q.category}]: ${q.text}\nCandidate's answer (auto-transcribed, may contain minor errors): ${transcripts[q.id] || '(no transcript captured for this answer)'}`
-  ).join('\n\n');
+function splitDataUrl(dataUrl){
+  const commaIdx = dataUrl.indexOf(',');
+  const header = dataUrl.slice(0, commaIdx);
+  const base64 = dataUrl.slice(commaIdx+1);
+  const mimeMatch = header.match(/data:(.*);base64/);
+  return { mime: mimeMatch ? mimeMatch[1] : 'video/webm', base64 };
+}
 
-  const prompt = `You are helping a recruiter measure a candidate's genuine INTEREST and SERIOUSNESS about a role, based on transcribed video interview answers. Use only the content of what they said — you cannot assess tone, appearance, or delivery.
-
-Role applied for: ${role}
-${jobDescription ? `\nJob description (for reference — use this to judge whether the candidate's stated motivation and readiness genuinely map to this specific role, not just enthusiasm in general):\n${jobDescription}\n` : ''}
-${qaText}
-
-Score each answer on a 1 (Low) to 5 (High) scale for how much genuine interest, preparation, and seriousness it shows, using this rubric:
-1 = generic, no research, passive, nothing beyond logistics.
-2 = some genuine interest but thin on specifics.
-3 = reasonable engagement, some specifics.
-4 = clear "why this role" narrative, thoughtful, engaged.
-5 = all of the above, plus proactive, forward-looking, highly specific answers.
-
-Also list any flight-risk flags as short strings (e.g. "vague on notice period", "generic motivation", "avoided the friction question", "unresolved deal-breakers") — an empty array if none stand out.
-
-Respond with ONLY valid JSON, no markdown, no preamble, in this exact shape:
-{"scores": {${questions.map(q=>`"${q.id}": 0`).join(', ')}}, "summary": "2-3 sentence recruiter-style note on overall interest and seriousness", "flags": []}`;
-
-  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=${encodeURIComponent(apiKey)}`, {
+async function callGeminiModel(apiKey, modelName, parts){
+  const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+    body: JSON.stringify({ contents: [{ parts }] })
   });
   if(!resp.ok){
     const errBody = await resp.text().catch(()=>'');
-    throw new Error(`Gemini API returned ${resp.status}${errBody ? ' — '+errBody.slice(0,200) : ''}`);
+    const err = new Error(`Gemini API returned ${resp.status}${errBody ? ' — '+errBody.slice(0,200) : ''}`);
+    err.status = resp.status;
+    throw err;
   }
   const data = await resp.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if(!text) throw new Error('Gemini response had no content — check your API key and quota');
   const clean = text.replace(/```json|```/g,'').trim();
   return JSON.parse(clean);
+}
+
+// Try the primary model with a retry, then fall back to a lighter model if
+// the primary keeps returning 503 (temporary overload) or 429 (rate limit).
+async function callGeminiWithRetry(apiKey, parts, onStatus){
+  const attempts = [
+    {model:'gemini-flash-latest', label:'Gemini Flash'},
+    {model:'gemini-flash-latest', label:'Gemini Flash (retry)'},
+    {model:'gemini-flash-lite-latest', label:'Gemini Flash-Lite (fallback)'}
+  ];
+  let lastErr;
+  for(let i=0;i<attempts.length;i++){
+    try{
+      if(onStatus) onStatus(attempts[i].label, i);
+      return await callGeminiModel(apiKey, attempts[i].model, parts);
+    }catch(e){
+      lastErr = e;
+      const isOverloaded = e.status===503 || e.status===429;
+      if(!isOverloaded) throw e;
+      if(i < attempts.length-1) await new Promise(r=>setTimeout(r, 1500));
+    }
+  }
+  throw lastErr;
+}
+
+// Scores a single question by sending Gemini the actual video — works
+// regardless of whether the browser captured a live transcript, and even
+// works for old recordings made before transcript capture existed.
+async function scoreOneAnswerWithGemini(apiKey, role, jobDescription, question, dataUrl, onStatus){
+  const { mime, base64 } = splitDataUrl(dataUrl);
+  const instructions = `You are helping a recruiter measure a candidate's genuine INTEREST and SERIOUSNESS about a role, based on this video answer. Focus on the CONTENT of what they say — you may also note real, visible seriousness cues if present, but content is the primary signal.
+
+Role applied for: ${role}
+${jobDescription ? `\nJob description (for reference — use this to judge whether the answer genuinely maps to this specific role):\n${jobDescription}\n` : ''}
+Question [${question.category}]: ${question.text}
+
+Score this answer 1 (Low) to 5 (High) using this rubric:
+1 — ${question.a1||'generic, no research, passive.'}
+3 — ${question.a3||'reasonable engagement, some specifics.'}
+5 — ${question.a5||'specific, proactive, highly engaged.'}
+(2 and 4 sit between those anchors.)
+
+Respond with ONLY valid JSON, no markdown, no preamble: {"score": 0, "note": "one sentence on why"}`;
+  return await callGeminiWithRetry(apiKey, [{text: instructions}, {inline_data:{mime_type: mime, data: base64}}], onStatus);
+}
+
+async function synthesizeSummary(apiKey, role, perQuestionResults){
+  const lines = perQuestionResults.map(r=>`${r.category}: score ${r.score ?? 'N/A'} — ${r.note}`).join('\n');
+  const prompt = `You are a recruiter's assistant. Based on these per-question scores and notes for a candidate's video assessment for the "${role}" role, write:
+1. A 2-3 sentence recruiter-style summary of their overall interest and seriousness.
+2. Any flight-risk flags as short strings (e.g. "vague on notice period", "did not answer Q3") — empty array if none stand out.
+
+${lines}
+
+Respond with ONLY valid JSON, no markdown, no preamble: {"summary": "...", "flags": []}`;
+  return await callGeminiWithRetry(apiKey, [{text: prompt}]);
+}
+
+async function scoreWithGemini(apiKey, role, jobDescription, questions, recordings, assessmentId, onStatus){
+  const perQuestion = [];
+  for(let i=0;i<questions.length;i++){
+    const q = questions[i];
+    const rec = recordings ? recordings[q.id] : null;
+    if(onStatus) onStatus(`Reviewing Q${i+1} of ${questions.length} (${q.category})`, i);
+    if(!rec){
+      perQuestion.push({id:q.id, category:q.category, score:1, note:'Candidate did not answer this question — no recording was submitted.'});
+      continue;
+    }
+    try{
+      const dataUrl = await loadRecordingDataUrl(assessmentId, q.id, rec.chunkCount);
+      const result = await scoreOneAnswerWithGemini(apiKey, role, jobDescription, q, dataUrl,
+        (label)=>{ if(onStatus) onStatus(`Reviewing Q${i+1} of ${questions.length} — ${label}`, i); });
+      perQuestion.push({id:q.id, category:q.category, score: result.score ?? null, note: result.note || ''});
+    }catch(e){
+      console.error('scoreOneAnswerWithGemini failed for', q.id, e);
+      perQuestion.push({id:q.id, category:q.category, score:null, note:`Could not score this answer — ${e.message||String(e)}`});
+    }
+  }
+  if(onStatus) onStatus('Writing overall summary…', questions.length);
+  let summary = '', flags = [];
+  try{
+    const synth = await synthesizeSummary(apiKey, role, perQuestion);
+    summary = synth.summary || '';
+    flags = synth.flags || [];
+  }catch(e){
+    console.error('synthesizeSummary failed', e);
+    summary = 'Per-question scores were generated, but the overall summary could not be produced — see individual answer notes.';
+  }
+  const scores = {};
+  perQuestion.forEach(r=>{ scores[r.id] = r.score; });
+  return { scores, summary, flags, perQuestion };
 }
 
 /* ---------------- Zoho Recruit push ---------------- */
@@ -974,8 +1053,8 @@ async function openAssessmentDetail(id){
     <button class="btn btn-primary btn-block" id="saveDetailBtn" style="margin-top:16px;">Save scores &amp; notes</button>
   </div>`;
   document.body.appendChild(overlay);
-  overlay.addEventListener('click', e=>{ if(e.target===overlay) overlay.remove(); });
-  document.getElementById('closeDetail').addEventListener('click', ()=>overlay.remove());
+  overlay.addEventListener('click', e=>{ if(e.target===overlay){ overlay.remove(); renderAssessmentsTab(); } });
+  document.getElementById('closeDetail').addEventListener('click', ()=>{ overlay.remove(); renderAssessmentsTab(); });
   document.getElementById('copyPortal').addEventListener('click', ()=>copyLink(base));
   document.getElementById('copyCode').addEventListener('click', ()=>copyLink(code));
   const jdToggle = document.getElementById('jdToggle');
@@ -987,21 +1066,13 @@ async function openAssessmentDetail(id){
       resultBox.innerHTML = `<div class="error-text">No Gemini API key configured yet — add one for free in Settings first.</div>`;
       return;
     }
-    const transcripts = {};
-    let anyTranscript = false;
-    (meta.questions||[]).forEach(q=>{
-      const rec = meta.recordings ? meta.recordings[q.id] : null;
-      if(rec && rec.transcript){ transcripts[q.id] = rec.transcript; anyTranscript = true; }
-    });
-    if(!anyTranscript){
-      resultBox.innerHTML = `<div class="error-text">No transcripts were captured for this candidate's answers (their browser may not have supported live transcription). AI scoring needs a transcript to work.</div>`;
-      return;
-    }
     const btn = document.getElementById('scoreAiBtn');
     btn.disabled = true; btn.textContent = 'Scoring…';
-    resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>Asking Gemini to review the transcripts…</div>`;
+    resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>Asking Gemini to review the answers…</div>`;
     try{
-      const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.jobDescription||'', meta.questions||[], transcripts);
+      const result = await scoreWithGemini(cfg.geminiApiKey, meta.role, meta.jobDescription||'', meta.questions||[], meta.recordings||{}, id,
+        (label, i)=>{ resultBox.innerHTML = `<div class="loader"><div class="spinner"></div>${escapeHtml(label)}…</div>`; }
+      );
       const newScores = {};
       (meta.questions||[]).forEach(q=>{
         const suggested = result.scores ? result.scores[q.id] : null;
@@ -1014,10 +1085,14 @@ async function openAssessmentDetail(id){
       meta.scores = newScores;
       const saved = await saveMeta(id, meta);
       const flagsHtml = (result.flags||[]).map(f=>`<span class="flag-tag">${escapeHtml(f)}</span>`).join('');
+      const perQHtml = (result.perQuestion||[]).map(r=>
+        `<div style="font-size:12.5px;color:var(--muted);margin-top:4px;"><strong>${escapeHtml(r.category)}:</strong> ${r.score!=null?r.score+'/5 — ':'not scored — '}${escapeHtml(r.note||'')}</div>`
+      ).join('');
       resultBox.innerHTML = `<div class="card pad" style="background:#F5F7FA;">
         <strong style="font-size:13px;">${saved ? '✓ AI scores saved automatically' : '⚠ AI scores filled in, but auto-save failed — click "Save scores & notes" below'}:</strong>
         <p style="font-size:13.5px;color:var(--muted);margin:6px 0 0;line-height:1.5;">${escapeHtml(result.summary||'')}</p>
         ${flagsHtml ? `<div style="margin-top:8px;">${flagsHtml}</div>` : ''}
+        ${perQHtml ? `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">${perQHtml}</div>` : ''}
         <p class="helper" style="margin-top:8px;margin-bottom:0;">You can still adjust any score above and click "Save scores & notes" to override.</p>
       </div>`;
       toast(saved ? 'AI scores saved — adjust and re-save if needed' : 'AI scoring done, but saving failed');

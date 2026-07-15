@@ -269,7 +269,7 @@ const DEFAULT_QUESTIONS = [
    a5:'Specific, minimal, or already-resolved conditions — a sign they are essentially ready to accept.'}
 ];
 
-const BUILD_VERSION = '2026-07-14.FB14 (AI scores directly from video — no transcript required, works on old recordings too)';
+const BUILD_VERSION = '2026-07-14.FB15 (one-time-use candidate links + real hiring-manager review link)';
 const MAX_RECORD_SECONDS = 90;
 
 /* ---------------- storage helpers (Firestore) ---------------- */
@@ -407,13 +407,10 @@ function parseHash(){
 
 async function router(){
   const params = parseHash();
-  // Hash routing only works when the browser's real address bar hash reaches
-  // this document (e.g. opened as a local/self-hosted file). Published
-  // Claude artifacts render inside a sandboxed iframe that can't see the
-  // parent tab's URL, so this will rarely fire there — renderLanding()
-  // below is the path that actually works in that environment.
   if(params.assessment){
     await renderCandidateFlow(params.assessment);
+  } else if(params.review){
+    await renderReview(params.review);
   } else if(params.tab){
     await renderRecruiterArea(params.tab);
   } else if(params.recruiter){
@@ -1032,7 +1029,11 @@ async function openAssessmentDetail(id){
           <div class="link-box"><span class="mono" style="font-size:15px;font-weight:700;">${code}</span><button class="btn btn-ghost" id="copyCode" style="padding:6px 10px;">Copy</button></div>
         </div>
       </div>
-      <p class="helper" style="margin-top:10px;margin-bottom:0;">Give the candidate the portal link + code, and tell them to choose "candidate assessment code." To share a recording with a hiring manager, use the "Download this recording" button under each answer below and forward the video file directly (email, Slack, Drive) — no extra link or code needed.</p>
+      <div style="margin-top:14px;">
+        <label style="font-size:11px;font-weight:600;color:var(--muted);text-transform:uppercase;">Hiring-manager review link (read-only, no passcode needed)</label>
+        <div class="link-box"><a class="mono" href="${base}#review=${code}" target="_blank" rel="noopener">${base}#review=${code}</a><button class="btn btn-ghost" id="copyReviewLink" style="padding:6px 10px;">Copy</button></div>
+      </div>
+      <p class="helper" style="margin-top:10px;margin-bottom:0;">Give the candidate the portal link + code, and tell them to choose "candidate assessment code" — that link and code can only be used once. Send the review link above directly to a hiring manager — it opens a read-only page where they can watch every recorded answer, no login or code needed.</p>
       <span class="badge badge-grey" style="margin-top:10px;display:inline-flex;">${answeredCount}/${totalQ} answered</span>
     </div>
     ${meta.jobDescription ? `<div style="margin-bottom:16px;">
@@ -1057,6 +1058,7 @@ async function openAssessmentDetail(id){
   document.getElementById('closeDetail').addEventListener('click', ()=>{ overlay.remove(); renderAssessmentsTab(); });
   document.getElementById('copyPortal').addEventListener('click', ()=>copyLink(base));
   document.getElementById('copyCode').addEventListener('click', ()=>copyLink(code));
+  document.getElementById('copyReviewLink').addEventListener('click', ()=>copyLink(`${base}#review=${code}`));
   const jdToggle = document.getElementById('jdToggle');
   if(jdToggle){ jdToggle.addEventListener('click', ()=>{ document.getElementById('jdBox').classList.toggle('hidden'); }); }
   document.getElementById('scoreAiBtn').addEventListener('click', async ()=>{
@@ -1343,6 +1345,81 @@ async function renderSettingsTab(){
 /* ==================================================================
    CANDIDATE FLOW
    ================================================================== */
+async function renderReview(id){
+  const app = document.getElementById('app');
+  const meta = await getMeta(id);
+  if(!meta){
+    app.innerHTML = `<div class="gate-wrap"><div class="gate-card" style="text-align:center;">
+      <span class="signal-mark"><span></span><span></span><span></span><span></span></span>
+      <h1>Link not found</h1><p>This review link is no longer valid, or the assessment was removed.</p>
+    </div></div>`;
+    return;
+  }
+  const scores = meta.scores || {};
+  const totalQ = (meta.questions||[]).length;
+  const scoredAll = totalQ && (meta.questions||[]).every(q=> scores[q.id]!=null);
+  let riskHtml = '';
+  if(scoredAll){
+    const avg = meta.questions.reduce((s,q)=>s+Number(scores[q.id]||0),0)/totalQ;
+    const rb = riskBand(avg);
+    riskHtml = `<div class="risk-panel" style="background:${rb.panelBg};">
+      <div class="score-total" style="color:${rb.panelColor};">${avg.toFixed(1)}</div>
+      <div><div style="font-weight:700;color:${rb.panelColor};">${rb.label}</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:2px;">Recruiter-assessed weighted total</div></div>
+    </div>`;
+  }
+  let qaHtml = '';
+  let qNum = 0;
+  for(const q of (meta.questions||[])){
+    qNum++;
+    const rec = meta.recordings ? meta.recordings[q.id] : null;
+    const safeName = (meta.candidateName||'candidate').replace(/[^a-z0-9]+/gi,'_').toLowerCase();
+    const fileName = `${safeName}_q${qNum}.webm`;
+    qaHtml += `<div class="qa-block">
+      <span class="q-tag">${escapeHtml(q.category)}</span>
+      <h4>${escapeHtml(q.text)}</h4>
+      <div class="qa-flex">
+        <div id="rv-video-${q.id}">
+          ${rec ? `<button class="btn btn-ghost" data-rv-load="${q.id}" data-chunks="${rec.chunkCount}" data-filename="${fileName}">▶ Load recording</button>`
+                : `<div class="qa-video" style="height:200px;display:flex;align-items:center;justify-content:center;color:#8FA0BE;font-size:13px;">No recording</div>`}
+        </div>
+        <div class="qa-score"><span class="badge ${scores[q.id]!=null?'badge-green':'badge-grey'}">${scores[q.id]!=null? 'Score: '+scores[q.id]+' / 5' : 'Not yet scored'}</span></div>
+      </div>
+    </div>`;
+  }
+  app.innerHTML = `
+    <div style="background:var(--navy);padding:22px 40px;"><div class="brand"><span class="signal-mark"><span></span><span></span><span></span><span></span></span>Signal — Hiring manager review</div></div>
+    <div class="main" style="max-width:760px;margin:0 auto;">
+      <div class="topline"><div>
+        <h2>${escapeHtml(meta.candidateName)}</h2>
+        <p>${escapeHtml(meta.role)}${meta.country ? ' · '+escapeHtml(meta.country) : ''} · ${escapeHtml(meta.stage)} · ${meta.createdAt ? fmtDate(meta.createdAt) : ''}</p>
+      </div></div>
+      ${riskHtml}
+      ${meta.jobDescription ? `<div style="margin-bottom:16px;"><div class="expand-toggle" id="rvJdToggle" style="font-size:12px;color:var(--muted);cursor:pointer;text-decoration:underline;">Job description reference</div><div class="jd-box hidden" id="rvJdBox">${escapeHtml(meta.jobDescription)}</div></div>` : ''}
+      ${qaHtml}
+      ${meta.notes ? `<div class="card pad"><h4 style="margin-bottom:8px;">Recruiter notes</h4><p style="color:var(--muted);font-size:14px;line-height:1.6;">${escapeHtml(meta.notes)}</p></div>` : ''}
+    </div>`;
+  const rvJdToggle = document.getElementById('rvJdToggle');
+  if(rvJdToggle){ rvJdToggle.addEventListener('click', ()=>{ document.getElementById('rvJdBox').classList.toggle('hidden'); }); }
+  app.querySelectorAll('[data-rv-load]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const qId = btn.dataset.rvLoad;
+      const chunkCount = Number(btn.dataset.chunks);
+      const fileName = btn.dataset.filename;
+      const container = document.getElementById('rv-video-'+qId);
+      btn.disabled = true; btn.textContent = 'Loading…';
+      try{
+        const dataUrl = await loadRecordingDataUrl(id, qId, chunkCount);
+        container.innerHTML = `<video class="qa-video" controls src="${dataUrl}"></video>
+          <a class="btn btn-ghost" href="${dataUrl}" download="${fileName}" style="margin-top:8px;display:inline-flex;padding:7px 12px;font-size:13px;">⬇ Download</a>`;
+      }catch(e){
+        console.error('loadRecordingDataUrl failed', e);
+        container.innerHTML = `<div class="error-text">Couldn't load this recording — ${escapeHtml(e.message||String(e))}</div>`;
+      }
+    });
+  });
+}
+
 async function renderCandidateFlow(id){
   const app = document.getElementById('app');
   const meta = await getMeta(id);
@@ -1351,6 +1428,14 @@ async function renderCandidateFlow(id){
       <span class="signal-mark"><span></span><span></span><span></span><span></span></span>
       <h2 style="margin-top:14px;">Link not found</h2>
       <p style="color:var(--muted);font-size:14px;">This assessment link is invalid or has been removed. Please check with your recruiter.</p>
+    </div></div></div>`;
+    return;
+  }
+  if(meta.status === 'submitted'){
+    app.innerHTML = `<div class="cand-wrap"><div class="cand-shell"><div class="cand-card" style="text-align:center;">
+      <span class="signal-mark"><span></span><span></span><span></span><span></span></span>
+      <h2 style="margin-top:14px;">This assessment has already been submitted</h2>
+      <p style="color:var(--muted);font-size:14px;line-height:1.6;">Thanks, ${escapeHtml(meta.candidateName.split(' ')[0])} — your responses for the <strong>${escapeHtml(meta.role)}</strong> role were already recorded. This link and code can only be used once. If you believe this is a mistake, please contact your recruiter.</p>
     </div></div></div>`;
     return;
   }
